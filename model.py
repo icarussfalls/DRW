@@ -193,18 +193,10 @@ class Transformer(nn.Module):
         self.projection = ProjectionLayer(d_model, output_dim)
 
     def forward(self, src, src_mask=None):
-        x = self.embedding(src)
-        print("After embedding:", torch.isnan(x).any(), x.min().item(), x.max().item())
-        
-        x = self.positional_encoding(x)
-        print("After positional encoding:", torch.isnan(x).any(), x.min().item(), x.max().item())
-        
+        x = self.embedding(src)        
+        x = self.positional_encoding(x)        
         x = self.encoder(x, src_mask)
-        print("After encoder:", torch.isnan(x).any(), x.min().item(), x.max().item())
-        
-        out = self.projection(x)
-        print("After projection:", torch.isnan(out).any(), out.min().item(), out.max().item())
-        
+        out = self.projection(x)        
         return out
 
 
