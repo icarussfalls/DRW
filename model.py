@@ -101,6 +101,7 @@ class MultiHeadAttentionBlock(nn.Module):
         out = self.w_o(out)
 
         return out
+    
 
 # Feed Forward Block
 class FeedForwardBlock(nn.Module):
@@ -142,18 +143,48 @@ class EncoderBlock(nn.Module):
         return x
 
 # Encoder: stack of EncoderBlocks
+# class Encoder(nn.Module):
+#     def __init__(self, d_model: int, num_heads: int, d_ff: int, num_layers: int, dropout: float = 0.1):
+#         super().__init__()
+#         self.layers = nn.ModuleList([
+#             EncoderBlock(d_model, num_heads, d_ff, dropout) for _ in range(num_layers)
+#         ])
+#         self.norm = LayerNormalization(d_model)
+
+#     def forward(self, x, src_mask=None):
+#         for layer in self.layers:
+#             x = layer(x, src_mask)
+#         return self.norm(x)
+
+# encoder with stochastic layer drop
 class Encoder(nn.Module):
-    def __init__(self, d_model: int, num_heads: int, d_ff: int, num_layers: int, dropout: float = 0.1):
+    def __init__(self, d_model: int, num_heads: int, d_ff: int, num_layers: int, dropout: float = 0.1, layerdrop: float = 0.1):
         super().__init__()
         self.layers = nn.ModuleList([
             EncoderBlock(d_model, num_heads, d_ff, dropout) for _ in range(num_layers)
         ])
         self.norm = LayerNormalization(d_model)
+        self.layerdrop = layerdrop  # Probability of dropping a layer
+        self.num_layers = num_layers
 
     def forward(self, x, src_mask=None):
-        for layer in self.layers:
-            x = layer(x, src_mask)
+        if self.training and self.layerdrop > 0.0:
+            drop_prob = self.layerdrop
+            for layer in self.layers:
+                if torch.rand(1).item() < drop_prob:
+                    # Skip this layer entirely
+                    continue
+                else:
+                    # Apply the layer and scale residual to keep expectation same
+                    residual = layer(x, src_mask) - x
+                    x = x + residual / (1 - drop_prob)
+        else:
+            # No stochastic depth, apply all layers normally
+            for layer in self.layers:
+                x = layer(x, src_mask)
         return self.norm(x)
+
+
 
 # the below approach introduces layer drop with probability, in which we drop a layer
 # class Encoder(nn.Module):
@@ -213,15 +244,15 @@ def build_transformer(input_dim, d_model, num_heads, d_ff,
     return transformer
 
 
-# Example usage:
-if __name__ == "__main__":
-    batch_size = 32
-    seq_len = 60
-    input_dim = 900  # number of features per time step
+# if __name__ == "__main__":
+#     batch_size = 32
+#     seq_len = 60
+#     input_dim = 900  # number of features per time step
 
-    model = build_transformer(input_dim=input_dim, d_model=512, num_heads=8, d_ff=2048,
-                              num_layers=6, max_seq_len=100, output_dim=1, dropout=0.1)
+#     model = build_transformer(input_dim=input_dim, d_model=512, num_heads=8, d_ff=2048,
+#                               num_layers=6, max_seq_len=100, output_dim=1, dropout=0.1)
 
-    src = torch.randn(batch_size, seq_len, input_dim)
-    logits = model(src)  # shape: (batch_size, seq_len, output_dim)
-    print(logits.shape)  # Expected: torch.Size([32, 60, 1])
+#     src = torch.randn(batch_size, seq_len, input_dim)
+#     logits = model(src)  # shape: (batch_size, seq_len, output_dim)
+#     print(logits.shape)  # Expected: torch.Size([32, 60, 1])
+
