@@ -120,3 +120,57 @@
 #         out = out.transpose(1, 2).reshape(B, T, C)  # (B, T, d_model)
 #         out = self.out_proj(out)
 #         return out
+
+
+# # Multi-Head Attention Block
+# class MultiHeadAttentionBlock(nn.Module):
+#     def __init__(self, d_model: int, num_heads: int, dropout: float = 0.1):
+#         super().__init__()
+#         assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
+#         self.d_model = d_model
+#         self.num_heads = num_heads
+#         self.d_k = d_model // num_heads
+
+#         self.w_q = nn.Linear(d_model, d_model)
+#         self.w_k = nn.Linear(d_model, d_model)
+#         self.w_v = nn.Linear(d_model, d_model)
+
+#         self.w_o = nn.Linear(d_model, d_model)
+
+#         self.dropout = nn.Dropout(dropout)
+#         self.scale = math.sqrt(self.d_k)
+
+#         # Learnable temperature parameter for Gumbel-Softmax (initialized to 1.0)
+#         self.log_tau = nn.Parameter(torch.tensor(0.0))  # log(1.0) = 0.0
+
+#     def forward(self, query, key, value, mask=None, stochastic=False):
+#         batch_size = query.size(0)
+
+#         Q = self.w_q(query)
+#         K = self.w_k(key)
+#         V = self.w_v(value)
+
+#         Q = Q.view(batch_size, -1, self.num_heads, self.d_k).transpose(1, 2)
+#         K = K.view(batch_size, -1, self.num_heads, self.d_k).transpose(1, 2)
+#         V = V.view(batch_size, -1, self.num_heads, self.d_k).transpose(1, 2)
+
+#         scores = torch.matmul(Q, K.transpose(-2, -1)) / self.scale
+
+#         if mask is not None:
+#             scores = scores.masked_fill(mask == 0, float('-inf'))
+
+#         if stochastic:
+#             tau = torch.exp(self.log_tau)  # ensure tau > 0
+#             gumbel_noise = -torch.empty_like(scores).exponential_().log()
+#             scores = (scores + gumbel_noise) / tau
+#             attn = F.softmax(scores, dim=-1)
+#         else:
+#             attn = F.softmax(scores, dim=-1)
+
+#         attn = self.dropout(attn)
+#         out = torch.matmul(attn, V)
+
+#         out = out.transpose(1, 2).contiguous().view(batch_size, -1, self.d_model)
+#         out = self.w_o(out)
+
+#         return out

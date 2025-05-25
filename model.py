@@ -24,7 +24,7 @@ import math
     
 # Positional Encoding with learnable embeddings
 class PositionalEncoding(nn.Module):
-    def __init__(self, d_model: int, max_len: int = 60, dropout: float = 0.1):
+    def __init__(self, d_model: int, max_len: int = 60, dropout: float = 0.2):
         super().__init__()
         self.dropout = nn.Dropout(dropout)
 
@@ -71,7 +71,7 @@ class LayerNormalization(nn.Module):
 
 # Multi-Head Attention Block
 class MultiHeadAttentionBlock(nn.Module):
-    def __init__(self, d_model: int, num_heads: int, dropout: float = 0.1):
+    def __init__(self, d_model: int, num_heads: int, dropout: float = 0.2):
         super().__init__()
         assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
         self.d_model = d_model
@@ -125,7 +125,7 @@ class MultiHeadAttentionBlock(nn.Module):
 
 # Feed Forward Block
 class FeedForwardBlock(nn.Module):
-    def __init__(self, d_model: int, d_ff: int, dropout: float = 0.1):
+    def __init__(self, d_model: int, d_ff: int, dropout: float = 0.2):
         super().__init__()
         self.linear1 = nn.Linear(d_model, d_ff)
         self.dropout = nn.Dropout(dropout)
@@ -136,7 +136,7 @@ class FeedForwardBlock(nn.Module):
 
 # Residual Connection + LayerNorm block
 class ResidualConnection(nn.Module):
-    def __init__(self, features: int, dropout: float = 0.1):
+    def __init__(self, features: int, dropout: float = 0.2):
         super().__init__()
         self.dropout = nn.Dropout(dropout)
         self.norm = LayerNormalization(features)
@@ -146,7 +146,7 @@ class ResidualConnection(nn.Module):
 
 # Encoder Block (one Transformer encoder layer)
 class EncoderBlock(nn.Module):
-    def __init__(self, d_model: int, num_heads: int, d_ff: int, dropout: float = 0.1):
+    def __init__(self, d_model: int, num_heads: int, d_ff: int, dropout: float = 0.2):
         super().__init__()
         self.self_attention = MultiHeadAttentionBlock(d_model, num_heads, dropout)
         self.feed_forward = FeedForwardBlock(d_model, d_ff, dropout)
@@ -178,7 +178,7 @@ class EncoderBlock(nn.Module):
 
 # encoder with stochastic layer drop
 class Encoder(nn.Module):
-    def __init__(self, d_model: int, num_heads: int, d_ff: int, num_layers: int, dropout: float = 0.1, layerdrop: float = 0.1):
+    def __init__(self, d_model: int, num_heads: int, d_ff: int, num_layers: int, dropout: float = 0.2, layerdrop: float = 0.2):
         super().__init__()
         self.layers = nn.ModuleList([
             EncoderBlock(d_model, num_heads, d_ff, dropout) for _ in range(num_layers)
@@ -236,7 +236,7 @@ class ProjectionLayer(nn.Module):
 # Full Transformer model (only encoder, for single step or sequence outputs)
 class Transformer(nn.Module):
     def __init__(self, input_dim: int, d_model: int, num_heads: int, d_ff: int,
-                 num_layers: int, max_seq_len: int, output_dim: int, dropout: float = 0.1):
+                 num_layers: int, max_seq_len: int, output_dim: int, dropout: float = 0.2):
         super().__init__()
         self.embedding = InputEmbeddings(input_dim, d_model)
         self.positional_encoding = PositionalEncoding(d_model, max_seq_len, dropout)
