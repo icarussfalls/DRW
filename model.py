@@ -23,22 +23,36 @@ import math
 #         return self.dropout(x)
     
 # Positional Encoding with learnable embeddings
+# don't waste time since positions are destroyed lol
+# class PositionalEncoding(nn.Module):
+#     def __init__(self, d_model: int, max_len: int, dropout: float):
+#         super().__init__()
+#         self.dropout = nn.Dropout(dropout)
+
+#         pe = torch.zeros(max_len, d_model)
+#         position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+#         div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+#         pe[:, 0::2] = torch.sin(position * div_term)
+#         pe[:, 1::2] = torch.cos(position * div_term)
+#         pe = pe.unsqueeze(0)  # (1, max_len, d_model)
+#         self.register_buffer('pe', pe)
+
+#     def forward(self, x):
+#         # x shape: (batch_size, seq_len, d_model)
+#         x = x + self.pe[:, :x.size(1), :].detach()
+#         return self.dropout(x)
+    
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model: int, max_len: int, dropout: float):
         super().__init__()
         self.dropout = nn.Dropout(dropout)
-
-        pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0)  # (1, max_len, d_model)
-        self.register_buffer('pe', pe)
+        self.pos_embedding = nn.Embedding(max_len, d_model)
 
     def forward(self, x):
-        # x shape: (batch_size, seq_len, d_model)
-        x = x + self.pe[:, :x.size(1), :].detach()
+        seq_len = x.size(1)
+        positions = torch.arange(seq_len, device=x.device).unsqueeze(0)
+        pos_emb = self.pos_embedding(positions)
+        x = x + pos_emb
         return self.dropout(x)
 
 
@@ -150,6 +164,14 @@ class MultiHeadAttentionBlock(nn.Module):
         out = self.add_gaussian_noise(out, self.output_noise_std)
 
         return out
+
+    def get_noise_levels(self):
+        """Get current noise standard deviations"""
+        return {
+            'attn_noise_std': F.softplus(self.attn_noise_std).item(),
+            'qkv_noise_std': F.softplus(self.qkv_noise_std).item(),
+            'output_noise_std': F.softplus(self.output_noise_std).item()
+        }
 
 # Feed Forward Block
 class FeedForwardBlock(nn.Module):
