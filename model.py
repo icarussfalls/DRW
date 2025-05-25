@@ -24,7 +24,7 @@ import math
     
 # Positional Encoding with learnable embeddings
 class PositionalEncoding(nn.Module):
-    def __init__(self, d_model: int, max_len: int = 60, dropout: float = 0.2):
+    def __init__(self, d_model: int, max_len: int, dropout: float):
         super().__init__()
         self.dropout = nn.Dropout(dropout)
 
@@ -69,9 +69,10 @@ class LayerNormalization(nn.Module):
         norm = (x - mean) / torch.sqrt(var + self.eps)
         return self.alpha * norm + self.bias
 
-# Multi-Head Attention Block
+
+# Multi-Head Attention Block with Learnable Gaussian Noise
 class MultiHeadAttentionBlock(nn.Module):
-    def __init__(self, d_model: int, num_heads: int, dropout: float = 0.2):
+    def __init__(self, d_model: int, num_heads: int, dropout: float):
         super().__init__()
         assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
         self.d_model = d_model
@@ -89,43 +90,70 @@ class MultiHeadAttentionBlock(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.scale = math.sqrt(self.d_k)
 
+        # Learnable noise parameters
+        self.attn_noise_std = nn.Parameter(torch.tensor(0.1))  # Attention weights noise
+        self.qkv_noise_std = nn.Parameter(torch.tensor(0.05))  # QKV projections noise
+        self.output_noise_std = nn.Parameter(torch.tensor(0.02))  # Output noise
+
+    def add_gaussian_noise(self, tensor, noise_std_param):
+        """Add learnable Gaussian noise during training"""
+        if not self.training:
+            return tensor
+        
+        # Use softplus to ensure positive noise std
+        noise_std = F.softplus(noise_std_param)
+        noise = torch.randn_like(tensor) * noise_std
+        return tensor + noise
+
     def forward(self, query, key, value, mask=None):
         batch_size = query.size(0)
 
         # Linear projections
-        Q = self.w_q(query)  # (batch, seq_len, d_model)
+        Q = self.w_q(query)
         K = self.w_k(key)
         V = self.w_v(value)
 
+        # Add learnable Gaussian noise to QKV projections
+        Q = self.add_gaussian_noise(Q, self.qkv_noise_std)
+        K = self.add_gaussian_noise(K, self.qkv_noise_std)
+        V = self.add_gaussian_noise(V, self.qkv_noise_std)
+
         # Split into multiple heads and transpose
-        Q = Q.view(batch_size, -1, self.num_heads, self.d_k).transpose(1, 2)  # (batch, heads, seq_len, d_k)
+        Q = Q.view(batch_size, -1, self.num_heads, self.d_k).transpose(1, 2)
         K = K.view(batch_size, -1, self.num_heads, self.d_k).transpose(1, 2)
         V = V.view(batch_size, -1, self.num_heads, self.d_k).transpose(1, 2)
 
         # Scaled Dot-Product Attention
-        scores = torch.matmul(Q, K.transpose(-2, -1)) / self.scale  # (batch, heads, seq_len, seq_len)
+        scores = torch.matmul(Q, K.transpose(-2, -1)) / self.scale
 
         if mask is not None:
-            # mask shape: (batch, 1, 1, seq_len) or broadcastable
             scores = scores.masked_fill(mask == 0, float('-inf'))
 
         attn = F.softmax(scores, dim=-1)
+        
+        # Add learnable Gaussian noise to attention weights
+        attn = self.add_gaussian_noise(attn, self.attn_noise_std)
+        # Re-normalize after adding noise
+        attn = F.softmax(attn, dim=-1)
+        
         attn = self.dropout(attn)
 
-        out = torch.matmul(attn, V)  # (batch, heads, seq_len, d_k)
+        out = torch.matmul(attn, V)
 
         # Concatenate heads
-        out = out.transpose(1, 2).contiguous().view(batch_size, -1, self.d_model)  # (batch, seq_len, d_model)
+        out = out.transpose(1, 2).contiguous().view(batch_size, -1, self.d_model)
 
         # Final linear layer
         out = self.w_o(out)
+        
+        # Add learnable Gaussian noise to output
+        out = self.add_gaussian_noise(out, self.output_noise_std)
 
         return out
-    
 
 # Feed Forward Block
 class FeedForwardBlock(nn.Module):
-    def __init__(self, d_model: int, d_ff: int, dropout: float = 0.2):
+    def __init__(self, d_model: int, d_ff: int, dropout: float):
         super().__init__()
         self.linear1 = nn.Linear(d_model, d_ff)
         self.dropout = nn.Dropout(dropout)
@@ -136,7 +164,7 @@ class FeedForwardBlock(nn.Module):
 
 # Residual Connection + LayerNorm block
 class ResidualConnection(nn.Module):
-    def __init__(self, features: int, dropout: float = 0.2):
+    def __init__(self, features: int, dropout: float):
         super().__init__()
         self.dropout = nn.Dropout(dropout)
         self.norm = LayerNormalization(features)
@@ -146,7 +174,7 @@ class ResidualConnection(nn.Module):
 
 # Encoder Block (one Transformer encoder layer)
 class EncoderBlock(nn.Module):
-    def __init__(self, d_model: int, num_heads: int, d_ff: int, dropout: float = 0.2):
+    def __init__(self, d_model: int, num_heads: int, d_ff: int, dropout: float):
         super().__init__()
         self.self_attention = MultiHeadAttentionBlock(d_model, num_heads, dropout)
         self.feed_forward = FeedForwardBlock(d_model, d_ff, dropout)
@@ -178,7 +206,7 @@ class EncoderBlock(nn.Module):
 
 # encoder with stochastic layer drop
 class Encoder(nn.Module):
-    def __init__(self, d_model: int, num_heads: int, d_ff: int, num_layers: int, dropout: float = 0.2, layerdrop: float = 0.2):
+    def __init__(self, d_model: int, num_heads: int, d_ff: int, num_layers: int, dropout: float, layerdrop: float):
         super().__init__()
         self.layers = nn.ModuleList([
             EncoderBlock(d_model, num_heads, d_ff, dropout) for _ in range(num_layers)
@@ -236,11 +264,11 @@ class ProjectionLayer(nn.Module):
 # Full Transformer model (only encoder, for single step or sequence outputs)
 class Transformer(nn.Module):
     def __init__(self, input_dim: int, d_model: int, num_heads: int, d_ff: int,
-                 num_layers: int, max_seq_len: int, output_dim: int, dropout: float = 0.2):
+                 num_layers: int, max_seq_len: int, output_dim: int, dropout: float, layerdrop: float):
         super().__init__()
         self.embedding = InputEmbeddings(input_dim, d_model)
         self.positional_encoding = PositionalEncoding(d_model, max_seq_len, dropout)
-        self.encoder = Encoder(d_model, num_heads, d_ff, num_layers, dropout)
+        self.encoder = Encoder(d_model, num_heads, d_ff, num_layers, dropout, layerdrop)
         self.projection = ProjectionLayer(d_model, output_dim)
 
     def forward(self, src, src_mask=None):
@@ -254,8 +282,8 @@ class Transformer(nn.Module):
 
 # Function to build the transformer with typical hyperparameters
 def build_transformer(input_dim, d_model, num_heads, d_ff,
-                      num_layers, max_seq_len, output_dim, dropout):
-    transformer = Transformer(input_dim, d_model, num_heads, d_ff, num_layers, max_seq_len, output_dim, dropout)
+                      num_layers, max_seq_len, output_dim, dropout, layerdrop):
+    transformer = Transformer(input_dim, d_model, num_heads, d_ff, num_layers, max_seq_len, output_dim, dropout, layerdrop)
 
     for p in transformer.parameters():
         if p.dim() > 1:
@@ -270,7 +298,7 @@ def build_transformer(input_dim, d_model, num_heads, d_ff,
 #     input_dim = 900  # number of features per time step
 
 #     model = build_transformer(input_dim=input_dim, d_model=512, num_heads=8, d_ff=2048,
-#                               num_layers=6, max_seq_len=100, output_dim=1, dropout=0.1)
+#                               num_layers=6, max_seq_len=100, output_dim=1, dropout=0.1, layerdrop=0.1)
 
 #     src = torch.randn(batch_size, seq_len, input_dim)
 #     logits = model(src)  # shape: (batch_size, seq_len, output_dim)
