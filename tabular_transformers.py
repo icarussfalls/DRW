@@ -111,39 +111,37 @@ class Pooling(nn.Module):
         pooled = (x * weights).sum(dim=1)
         return pooled
 
-class Transformer(nn.Module):
+class TransformerWithConv(nn.Module):
     def __init__(self, num_features, d_model, n_heads, num_layers, d_ff, dropout, layerdrop, headdrop):
         super().__init__()
-        self.d_model = d_model
-        self.input_proj = nn.Linear(1, d_model)
+        # 1D convolution layer to extract local temporal features
+        self.conv1 = nn.Conv1d(in_channels=1, out_channels=d_model, kernel_size=3, padding=1)
         self.pos_encoder = PositionalEncoding(d_model, max_len=num_features)
 
         self.layers = nn.ModuleList([
             TransformerEncoderLayer(d_model, n_heads, d_ff, dropout, layerdrop, headdrop) for _ in range(num_layers)
         ])
         self.norm = nn.LayerNorm(d_model)
-
         self.pooling = Pooling(d_model)
-
         self.fc_out = nn.Linear(d_model, 1)
 
     def forward(self, x):
-        batch_size, seq_len = x.size()
-        x = x.unsqueeze(-1)  # (batch_size, seq_len, 1)
-        x = self.input_proj(x)
+        # x: (batch_size, seq_len)
+        x = x.unsqueeze(1)  # (batch_size, 1, seq_len)
+        x = self.conv1(x)   # (batch_size, d_model, seq_len)
+        x = x.transpose(1, 2)  # (batch_size, seq_len, d_model)
         x = self.pos_encoder(x)
-
+        
         for layer in self.layers:
             x = layer(x)
-
+        
         x = self.norm(x)
-
         x = self.pooling(x)
         out = self.fc_out(x).squeeze(-1)
         return out
 
 def build_transformer(num_features, d_model, n_heads, num_layers, d_ff, dropout, layerdrop, headdrop):
-    transformer = Transformer(
+    transformer = TransformerWithConv(
         num_features,
         d_model=d_model,
         n_heads=n_heads,
