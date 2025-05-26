@@ -1,6 +1,6 @@
 import torch
 from torch.utils.data import Dataset, DataLoader
-from test import build_transformers
+from tabular_transformers import build_transformers
 
 # Dummy dataset class
 class TabularDataset(Dataset):
