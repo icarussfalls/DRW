@@ -139,17 +139,20 @@ class Transformer(nn.Module):
         out = self.fc_out(x).squeeze(-1)  # (batch_size,)
         return out
 
-def build_transformers(num_features, d_model, n_heads, num_layers, d_ff, dropout):
-    model = Transformer(num_features, d_model=d_model, n_heads=n_heads, num_layers=num_layers, d_ff=d_ff, dropout=dropout)
-    return model
+def build_transformer(num_features, d_model, n_heads, num_layers, d_ff, dropout):
+    transformer = Transformer(num_features, d_model=d_model, n_heads=n_heads, num_layers=num_layers, d_ff=d_ff, dropout=dropout)
+    for p in transformer.parameters():
+        if p.dim() > 1:
+            nn.init.xavier_uniform_(p)
+    return transformer
 
 # Test the model
-if __name__ == "__main__":
-    batch_size = 8
-    num_features = 30
+# if __name__ == "__main__":
+#     batch_size = 8
+#     num_features = 30
 
-    model = Transformer(num_features=num_features, d_model=64, n_heads=8, num_layers=3, d_ff=256, dropout=0.1)
-    sample_input = torch.randn(batch_size, num_features)
+#     model = Transformer(num_features=num_features, d_model=64, n_heads=8, num_layers=3, d_ff=256, dropout=0.1)
+#     sample_input = torch.randn(batch_size, num_features)
 
-    output = model(sample_input)
-    print("Output shape:", output.shape)  # Should be (batch_size,)
+#     output = model(sample_input)
+#     print("Output shape:", output.shape)  # Should be (batch_size,)
