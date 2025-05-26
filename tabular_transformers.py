@@ -20,12 +20,13 @@ class ScaledDotProductAttention(nn.Module):
         return output, attn
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, d_model, n_heads, dropout):
+    def __init__(self, d_model, n_heads, dropout, headdrop):
         super().__init__()
         assert d_model % n_heads == 0
         self.d_model = d_model
         self.n_heads = n_heads
         self.head_dim = d_model // n_heads
+        self.headdrop = headdrop
 
         self.W_Q = nn.Linear(d_model, d_model)
         self.W_K = nn.Linear(d_model, d_model)
@@ -41,11 +42,19 @@ class MultiHeadAttention(nn.Module):
         K = self.W_K(x).view(batch_size, seq_len, self.n_heads, self.head_dim).transpose(1, 2)
         V = self.W_V(x).view(batch_size, seq_len, self.n_heads, self.head_dim).transpose(1, 2)
 
-        out, attn = self.attention(Q, K, V, mask)
+        out, attn = self.attention(Q, K, V, mask)  # (B, H, T, D)
+
+        # 🔥 HeadDrop: randomly zero out heads
+        if self.training and self.headdrop > 0.0:
+            drop_mask = (torch.rand(self.n_heads, device=x.device) > self.headdrop).float()
+            drop_mask = drop_mask.view(1, self.n_heads, 1, 1)
+            out = out * drop_mask  # apply head mask
+
         out = out.transpose(1, 2).contiguous().view(batch_size, seq_len, d_model)
         out = self.out_proj(out)
         out = self.dropout(out)
         return out
+
 
 class FeedForward(nn.Module):
     def __init__(self, d_model, d_ff, dropout):
@@ -62,10 +71,10 @@ class FeedForward(nn.Module):
         return x
 
 class TransformerEncoderLayer(nn.Module):
-    def __init__(self, d_model, n_heads, d_ff, dropout, layerdrop):
+    def __init__(self, d_model, n_heads, d_ff, dropout, layerdrop, headdrop):
         super().__init__()
         self.layerdrop = layerdrop
-        self.mha = MultiHeadAttention(d_model, n_heads, dropout)
+        self.mha = MultiHeadAttention(d_model, n_heads, dropout, headdrop)
         self.ff = FeedForward(d_model, d_ff, dropout)
         self.norm1 = nn.LayerNorm(d_model)
         self.norm2 = nn.LayerNorm(d_model)
@@ -109,14 +118,14 @@ class Pooling(nn.Module):
         return pooled
 
 class Transformer(nn.Module):
-    def __init__(self, num_features, d_model, n_heads, num_layers, d_ff, dropout, layerdrop):
+    def __init__(self, num_features, d_model, n_heads, num_layers, d_ff, dropout, layerdrop, headdrop):
         super().__init__()
         self.d_model = d_model
         self.input_proj = nn.Linear(1, d_model)
         self.pos_encoder = PositionalEncoding(d_model, max_len=num_features)
 
         self.layers = nn.ModuleList([
-            TransformerEncoderLayer(d_model, n_heads, d_ff, dropout, layerdrop) for _ in range(num_layers)
+            TransformerEncoderLayer(d_model, n_heads, d_ff, dropout, layerdrop, headdrop) for _ in range(num_layers)
         ])
         self.norm = nn.LayerNorm(d_model)
 
@@ -139,7 +148,7 @@ class Transformer(nn.Module):
         out = self.fc_out(x).squeeze(-1)
         return out
 
-def build_transformer(num_features, d_model, n_heads, num_layers, d_ff, dropout, layerdrop):
+def build_transformer(num_features, d_model, n_heads, num_layers, d_ff, dropout, layerdrop, headdrop):
     transformer = Transformer(
         num_features,
         d_model=d_model,
@@ -147,7 +156,8 @@ def build_transformer(num_features, d_model, n_heads, num_layers, d_ff, dropout,
         num_layers=num_layers,
         d_ff=d_ff,
         dropout=dropout,
-        layerdrop=layerdrop
+        layerdrop=layerdrop,
+        headdrop=headdrop
     )
     for p in transformer.parameters():
         if p.dim() > 1:
@@ -155,7 +165,7 @@ def build_transformer(num_features, d_model, n_heads, num_layers, d_ff, dropout,
     return transformer
 
 # Example usage:
-# model = build_transformer(num_features=30, d_model=64, n_heads=8, num_layers=3, d_ff=256, dropout=0.1, layerdrop=0.1)
+# model = build_transformer(num_features=30, d_model=64, n_heads=8, num_layers=3, d_ff=256, dropout=0.1, layerdrop=0.1, headdrop=0.1)
 # sample_input = torch.randn(8, 30)
 # output = model(sample_input)
 # print(output.shape)  # (8,)
