@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
+import random
 
 class ScaledDotProductAttention(nn.Module):
     def __init__(self, dropout):
@@ -9,16 +10,13 @@ class ScaledDotProductAttention(nn.Module):
         self.dropout = nn.Dropout(dropout)
     
     def forward(self, Q, K, V, mask=None):
-        # Q, K, V: (batch_size, n_heads, seq_len, head_dim)
         d_k = Q.size(-1)
-        scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(d_k)  # (batch, heads, seq_len, seq_len)
-
+        scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(d_k)
         if mask is not None:
             scores = scores.masked_fill(mask == 0, float('-inf'))
-        
         attn = torch.softmax(scores, dim=-1)
         attn = self.dropout(attn)
-        output = torch.matmul(attn, V)  # (batch, heads, seq_len, head_dim)
+        output = torch.matmul(attn, V)
         return output, attn
 
 class MultiHeadAttention(nn.Module):
@@ -29,7 +27,6 @@ class MultiHeadAttention(nn.Module):
         self.n_heads = n_heads
         self.head_dim = d_model // n_heads
 
-        # Learnable projections for Q, K, V
         self.W_Q = nn.Linear(d_model, d_model)
         self.W_K = nn.Linear(d_model, d_model)
         self.W_V = nn.Linear(d_model, d_model)
@@ -40,19 +37,12 @@ class MultiHeadAttention(nn.Module):
     
     def forward(self, x, mask=None):
         batch_size, seq_len, d_model = x.size()
-
-        # Linear projections and split into heads
         Q = self.W_Q(x).view(batch_size, seq_len, self.n_heads, self.head_dim).transpose(1, 2)
         K = self.W_K(x).view(batch_size, seq_len, self.n_heads, self.head_dim).transpose(1, 2)
         V = self.W_V(x).view(batch_size, seq_len, self.n_heads, self.head_dim).transpose(1, 2)
-        # Now Q,K,V are (batch_size, n_heads, seq_len, head_dim)
 
-        out, attn = self.attention(Q, K, V, mask)  # out shape same as Q,K,V
-
-        # Concatenate heads
+        out, attn = self.attention(Q, K, V, mask)
         out = out.transpose(1, 2).contiguous().view(batch_size, seq_len, d_model)
-
-        # Final linear layer
         out = self.out_proj(out)
         out = self.dropout(out)
         return out
@@ -72,8 +62,9 @@ class FeedForward(nn.Module):
         return x
 
 class TransformerEncoderLayer(nn.Module):
-    def __init__(self, d_model, n_heads, d_ff, dropout):
+    def __init__(self, d_model, n_heads, d_ff, dropout, layerdrop):
         super().__init__()
+        self.layerdrop = layerdrop
         self.mha = MultiHeadAttention(d_model, n_heads, dropout)
         self.ff = FeedForward(d_model, d_ff, dropout)
         self.norm1 = nn.LayerNorm(d_model)
@@ -81,11 +72,11 @@ class TransformerEncoderLayer(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x, mask=None):
-        # Self-attention + Add & Norm
+        if self.training and random.random() < self.layerdrop:
+            # Skip this layer entirely during training
+            return x
         attn_out = self.mha(x, mask)
         x = self.norm1(x + attn_out)
-
-        # Feed Forward + Add & Norm
         ff_out = self.ff(x)
         x = self.norm2(x + ff_out)
         return x
@@ -98,61 +89,73 @@ class PositionalEncoding(nn.Module):
         div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0)  # (1, max_len, d_model)
+        pe = pe.unsqueeze(0)
         self.register_buffer('pe', pe)
     
     def forward(self, x):
-        # x shape (batch_size, seq_len, d_model)
         x = x + self.pe[:, :x.size(1)]
         return x
 
+class Pooling(nn.Module):
+    def __init__(self, d_model):
+        super().__init__()
+        self.attn_vector = nn.Parameter(torch.randn(d_model))
+    
+    def forward(self, x):
+        # x: (batch_size, seq_len, d_model)
+        scores = torch.matmul(x, self.attn_vector)  # (batch_size, seq_len)
+        weights = torch.softmax(scores, dim=1).unsqueeze(-1)  # (batch_size, seq_len, 1)
+        pooled = (x * weights).sum(dim=1)
+        return pooled
+
 class Transformer(nn.Module):
-    def __init__(self, num_features, d_model, n_heads, num_layers, d_ff, dropout):
+    def __init__(self, num_features, d_model, n_heads, num_layers, d_ff, dropout, layerdrop):
         super().__init__()
         self.d_model = d_model
-        # Project each scalar feature to d_model embedding
         self.input_proj = nn.Linear(1, d_model)
         self.pos_encoder = PositionalEncoding(d_model, max_len=num_features)
 
         self.layers = nn.ModuleList([
-            TransformerEncoderLayer(d_model, n_heads, d_ff, dropout) for _ in range(num_layers)
+            TransformerEncoderLayer(d_model, n_heads, d_ff, dropout, layerdrop) for _ in range(num_layers)
         ])
         self.norm = nn.LayerNorm(d_model)
 
-        # Output layer - output single regression value per sample
+        self.pooling = Pooling(d_model)
+
         self.fc_out = nn.Linear(d_model, 1)
 
     def forward(self, x):
-        # x: (batch_size, num_features)
         batch_size, seq_len = x.size()
         x = x.unsqueeze(-1)  # (batch_size, seq_len, 1)
-        x = self.input_proj(x)  # (batch_size, seq_len, d_model)
+        x = self.input_proj(x)
         x = self.pos_encoder(x)
 
         for layer in self.layers:
             x = layer(x)
 
         x = self.norm(x)
-        # Pool over features: mean
-        x = x.mean(dim=1)  # (batch_size, d_model)
 
-        out = self.fc_out(x).squeeze(-1)  # (batch_size,)
+        x = self.pooling(x)
+        out = self.fc_out(x).squeeze(-1)
         return out
 
-def build_transformer(num_features, d_model, n_heads, num_layers, d_ff, dropout):
-    transformer = Transformer(num_features, d_model=d_model, n_heads=n_heads, num_layers=num_layers, d_ff=d_ff, dropout=dropout)
+def build_transformer(num_features, d_model, n_heads, num_layers, d_ff, dropout, layerdrop):
+    transformer = Transformer(
+        num_features,
+        d_model=d_model,
+        n_heads=n_heads,
+        num_layers=num_layers,
+        d_ff=d_ff,
+        dropout=dropout,
+        layerdrop=layerdrop
+    )
     for p in transformer.parameters():
         if p.dim() > 1:
             nn.init.xavier_uniform_(p)
     return transformer
 
-# Test the model
-# if __name__ == "__main__":
-#     batch_size = 8
-#     num_features = 30
-
-#     model = Transformer(num_features=num_features, d_model=64, n_heads=8, num_layers=3, d_ff=256, dropout=0.1)
-#     sample_input = torch.randn(batch_size, num_features)
-
-#     output = model(sample_input)
-#     print("Output shape:", output.shape)  # Should be (batch_size,)
+# Example usage:
+# model = build_transformer(num_features=30, d_model=64, n_heads=8, num_layers=3, d_ff=256, dropout=0.1, layerdrop=0.1)
+# sample_input = torch.randn(8, 30)
+# output = model(sample_input)
+# print(output.shape)  # (8,)
