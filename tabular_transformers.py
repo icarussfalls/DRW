@@ -230,7 +230,7 @@ class ImprovedTransformer(nn.Module):
         output = self.output_head(pooled).squeeze(-1)
         
         # Scale output to prevent extreme predictions
-        output = output * torch.sigmoid(self.output_scale)
+        # output = output * torch.sigmoid(self.output_scale)
         
         return output
 
