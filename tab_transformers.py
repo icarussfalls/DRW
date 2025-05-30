@@ -125,12 +125,16 @@ class RowWiseTransformers(nn.Module):
         out = self.to_out(x) # (batch, 1)
         return out.squeeze(-1) # (batch,)
         
+# function to build transformers model
+def build_transformers(num_features, dim, heads, depth, mlp_dim, dropout):
+    return RowWiseTransformers(num_features=num_features, dim=dim, heads=heads, depth=depth, mlp_dim=mlp_dim, dropout=dropout)
+
 
 if __name__ == "__main__":
     batch_size = 16
     num_features = 200
     
-    model = RowWiseTransformers(num_features=num_features, dim=64, heads = 4, depth=6, mlp_dim=2048, dropout=0.1)
+    model = build_transformers(num_features=num_features, dim=64, heads= 4, depth=6, mlp_dim=2048, dropout=0.1)
     dummy_x = torch.randn(batch_size, num_features)
 
     preds = model(dummy_x)
