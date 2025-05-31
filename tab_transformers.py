@@ -92,43 +92,49 @@ class TransformerBlock(nn.Module):
         
 
 class RowWiseTransformers(nn.Module):
-    def __init__(self, num_features, dim, depth, heads, mlp_dim, dropout, hidden_dim=32):
+    def __init__(self, num_features, dim, depth, heads, mlp_dim, dropout=0.5, row_norm=False):
         super().__init__()
-
         self.num_features = num_features
         self.dim = dim
-
-        # embed each scalar feature to vector dim
-        self.feature_embed = nn.Sequential(
-            nn.Linear(1, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, dim)
-        )
-
-
-        # positional embeddings per features
-        self.pos_embed = nn.Parameter(torch.randn(1, num_features, dim))
-
-        # stacks of transformers blocks
+        self.row_norm = row_norm
+        
+        # Simple feature embedding
+        self.feature_embed = nn.Linear(1, dim)
+        
+        # Learnable positional embeddings
+        self.pos_embed = nn.Parameter(torch.randn(num_features, dim) * 0.02) # Scaled init
+        
+        # Transformer blocks
         self.layers = nn.ModuleList([TransformerBlock(dim, heads, mlp_dim, dropout) for _ in range(depth)])
         
-        # final mlp head
-        self.to_out = nn.Sequential(nn.Flatten(),
-                                    nn.LayerNorm(num_features * dim),
-                                    nn.Linear(num_features * dim, 1)
-                                      )
-        
+        # Output: mean pooling + linear
+        self.norm = nn.LayerNorm(dim)
+        self.to_out = nn.Linear(dim, 1)
+    
     def forward(self, x):
-        # x -> (batch, num_features)
-        x = x.unsqueeze(-1) # (batch, num_features, 1)
-        x = self.feature_embed(x) # (batch, num_features, dim)
-        x = x + self.pos_embed # add positional encodings
-
+        # x: (batch_size, num_features)
+        if self.row_norm:
+            # Row-wise normalization
+            x_mean = x.mean(dim=-1, keepdim=True)
+            x_std = x.std(dim=-1, keepdim=True) + 1e-8
+            x = (x - x_mean) / x_std
+        
+        # Embed features
+        x = x.unsqueeze(-1)  # (batch_size, num_features, 1)
+        x = self.feature_embed(x)  # (batch_size, num_features, dim)
+        
+        # Add positional embeddings
+        x = x + self.pos_embed.unsqueeze(0)  # Broadcast: (batch_size, num_features, dim)
+        
+        # Apply transformer layers
         for layer in self.layers:
             x = layer(x)
-
-        out = self.to_out(x) # (batch, 1)
-        return out.squeeze(-1) # (batch,)
+        
+        # Pool and output
+        x = self.norm(x)
+        x = x.mean(dim=1)  # (batch_size, dim)
+        out = self.to_out(x)  # (batch_size, 1)
+        return out.squeeze(-1)  # (batch_size,)
         
 # function to build transformers model
 def build_transformers(num_features, dim, heads, depth, mlp_dim, dropout):
