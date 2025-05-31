@@ -92,14 +92,19 @@ class TransformerBlock(nn.Module):
         
 
 class RowWiseTransformers(nn.Module):
-    def __init__(self, num_features, dim, depth, heads, mlp_dim, dropout):
+    def __init__(self, num_features, dim, depth, heads, mlp_dim, dropout, hidden_dim=32):
         super().__init__()
 
         self.num_features = num_features
         self.dim = dim
 
         # embed each scalar feature to vector dim
-        self.feature_embed = nn.Linear(1, dim)
+        self.feature_embed = nn.Sequential(
+            nn.Linear(1, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, dim)
+        )
+
 
         # positional embeddings per features
         self.pos_embed = nn.Parameter(torch.randn(1, num_features, dim))
