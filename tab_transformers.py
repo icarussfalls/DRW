@@ -89,50 +89,55 @@ class TransformerBlock(nn.Module):
         x = x + self.ff(self.norm2(x))
 
         return x
+    
+    # --- Probabilistic Feature Bank ---
+class ProbabilisticFeatureBank(nn.Module):
+    def __init__(self, num_features, dim):
+        super().__init__()
+        self.mu = nn.Parameter(torch.randn(num_features, dim) * 0.01)
+        self.logvar = nn.Parameter(torch.randn(num_features, dim) * 0.01)
+
+    def forward(self, batch_values, deterministic=False):
+        # batch_values: (batch_size, num_features)
+        std = torch.exp(0.5 * self.logvar)  # (num_features, dim)
+        eps = torch.randn_like(std) if not deterministic else 0.0
+        sample = self.mu + eps * std  # (num_features, dim)
+
+        # Scale by actual input values
+        batch_size = batch_values.shape[0]
+        sample = sample.unsqueeze(0)  # (1, num_features, dim)
+        values = batch_values.unsqueeze(-1)  # (batch_size, num_features, 1)
+        return sample * values  # (batch_size, num_features, dim)
         
 
-class RowWiseTransformers(nn.Module):
-    def __init__(self, num_features, dim, depth, heads, mlp_dim, dropout, hidden_dim=32):
+# --- Main Model ---
+class RowWiseProbTransformer(nn.Module):
+    def __init__(self, num_features, dim, depth, heads, mlp_dim, dropout=0.1):
         super().__init__()
-
-        self.num_features = num_features
-        self.dim = dim
-
-        # embed each scalar feature to vector dim
-        self.feature_embed = nn.Sequential(
-            nn.Linear(1, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, dim)
+        self.feature_bank = ProbabilisticFeatureBank(num_features, dim)
+        self.pos_embed = nn.Parameter(torch.randn(1, num_features, dim))
+        self.layers = nn.ModuleList([
+            TransformerBlock(dim, heads, mlp_dim, dropout) for _ in range(depth)
+        ])
+        self.to_out = nn.Sequential(
+            nn.Flatten(),
+            nn.LayerNorm(num_features * dim),
+            nn.Linear(num_features * dim, 1)
         )
 
-
-        # positional embeddings per features
-        self.pos_embed = nn.Parameter(torch.randn(1, num_features, dim))
-
-        # stacks of transformers blocks
-        self.layers = nn.ModuleList([TransformerBlock(dim, heads, mlp_dim, dropout) for _ in range(depth)])
-        
-        # final mlp head
-        self.to_out = nn.Sequential(nn.Flatten(),
-                                    nn.LayerNorm(num_features * dim),
-                                    nn.Linear(num_features * dim, 1)
-                                      )
-        
-    def forward(self, x):
-        # x -> (batch, num_features)
-        x = x.unsqueeze(-1) # (batch, num_features, 1)
-        x = self.feature_embed(x) # (batch, num_features, dim)
-        x = x + self.pos_embed # add positional encodings
-
+    def forward(self, x, deterministic=False):
+        # x: (batch, num_features)
+        x = self.feature_bank(x, deterministic=deterministic)  # (batch, num_features, dim)
+        x = x + self.pos_embed  # broadcast positional embeddings
         for layer in self.layers:
             x = layer(x)
-
-        out = self.to_out(x) # (batch, 1)
-        return out.squeeze(-1) # (batch,)
+        out = self.to_out(x)  # (batch, 1)
+        return out.squeeze(-1)  # (batch,)
+        
         
 # function to build transformers model
 def build_transformers(num_features, dim, heads, depth, mlp_dim, dropout):
-    return RowWiseTransformers(num_features=num_features, dim=dim, heads=heads, depth=depth, mlp_dim=mlp_dim, dropout=dropout)
+    return RowWiseProbTransformer(num_features=num_features, dim=dim, heads=heads, depth=depth, mlp_dim=mlp_dim, dropout=dropout)
 
 
 if __name__ == "__main__":
