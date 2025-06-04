@@ -53,7 +53,7 @@ class MultiHeadAttention(nn.Module):
 
         # final linear projection
         out = self.to_out(out)
-        return out
+        return self.dropout(out)
         
 
 class FeedForward(nn.Module):
@@ -90,17 +90,31 @@ class FeedForward(nn.Module):
 
 #         return x
         
+# class FeatureProbabilityGate(nn.Module):
+#     def __init__(self, num_features):
+#         super().__init__()
+#         self.ln = nn.LayerNorm(num_features)
+#         self.proj = nn.Linear(num_features, num_features)
+
+#     def forward(self, x):
+#         # x: (batch, num_features)
+#         x = self.ln(x)  # helps with feature drift
+#         probs = torch.sigmoid(self.proj(x))  # smoother, per-feature weights
+#         return probs
+
 class FeatureProbabilityGate(nn.Module):
     def __init__(self, num_features):
         super().__init__()
         self.ln = nn.LayerNorm(num_features)
-        self.proj = nn.Linear(num_features, num_features)
+        # Instead of linear projection, learn per-feature bias
+        self.bias = nn.Parameter(torch.zeros(num_features))
 
     def forward(self, x):
-        # x: (batch, num_features)
-        x = self.ln(x)  # helps with feature drift
-        probs = torch.sigmoid(self.proj(x))  # smoother, per-feature weights
+        x = self.ln(x)
+        # Use sigmoid on x + learned bias per feature
+        probs = torch.sigmoid(x + self.bias)
         return probs
+
 
 class TransformerBlock(nn.Module):
     def __init__(self, dim, heads, mlp_dim, dropout):
@@ -147,6 +161,8 @@ class RowWiseTransformers(nn.Module):
             TransformerBlock(dim, heads, mlp_dim, dropout) for _ in range(depth)
         ])
 
+        self.final_norm = nn.LayerNorm(dim)
+
         self.to_out = nn.Sequential(
             nn.Flatten(),
             nn.LayerNorm(num_features * dim),
@@ -164,6 +180,8 @@ class RowWiseTransformers(nn.Module):
 
         for layer in self.layers:
             x = layer(x)
+
+        x = self.final_norm(x)
 
         out = self.to_out(x)
         return out.squeeze(-1)
