@@ -2,213 +2,221 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
+import numpy as np
 
+class RobustFeatureProbabilityGate(nn.Module):
+    def __init__(self, num_features):
+        super().__init__()
+        # More robust normalization with learnable affine parameters
+        self.norm = nn.BatchNorm1d(num_features)
+        self.bias = nn.Parameter(torch.zeros(num_features))
+        self.scale = nn.Parameter(torch.ones(num_features))
+        
+    def forward(self, x):
+        x = self.norm(x)
+        return torch.sigmoid(x * self.scale + self.bias)
 
-class MultiHeadAttention(nn.Module):
+class DriftAwareMultiHeadAttention(nn.Module):
     def __init__(self, dim, heads, dropout):
         super().__init__()
         assert dim % heads == 0, 'dim must be divisible by heads'
         self.dim = dim
         self.heads = heads
         self.head_dim = dim // heads
+        self.dropout = dropout
 
-        # linear layers to generate Q, K, and V
-
-        self.to_q = nn.Linear(dim, dim, bias=False)
-        self.to_k = nn.Linear(dim, dim, bias=False)
-        self.to_v = nn.Linear(dim, dim, bias=False)
-
-        # final linear projection
-        self.to_out = nn.Linear(dim, dim)  
-
-        self.dropout = nn.Dropout(dropout)
+        self.to_qkv = nn.Linear(dim, dim * 3, bias=False)
+        self.to_out = nn.Linear(dim, dim)
+        
+        # Additional drift-resistant parameters
+        self.attention_dropout = nn.Dropout(dropout)
+        self.rescale_factor = nn.Parameter(torch.tensor(1.0))
 
     def forward(self, x):
-        # x -> (batch_seq, num_features, dim)
-        # attention is over features
-
-        b, n, d = x.shape # n is the num features
-
-        # compute queries, keys, and values
-
-        q = self.to_q(x) # (b, n, d)
-        k = self.to_k(x) # (b, n, d)
-        v = self.to_v(x) # (b, n, d)
-
-        # split head (multi head attention)
-        q = q.view(b, n, self.heads, self.head_dim).transpose(1,2) # (b, heads, n, head_dim)
-        k = k.view(b, n, self.heads, self.head_dim).transpose(1,2) # (b, heads, n, head_dim)
-        v = v.view(b, n, self.heads, self.head_dim).transpose(1,2)
-
-        # scaled dot product attention
-
-        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim) # (b, heads, n, n)
-        attn = torch.softmax(scores, dim=-1)
-        attn = self.dropout(attn)
-
-        out = torch.matmul(attn, v)
-
-        # lets combine heads now
-        out = out.transpose(1, 2).contiguous().view(b, n, d) # (b, n, d)
-
-        # final linear projection
-        out = self.to_out(out)
-        return self.dropout(out)
+        b, n, d = x.shape
         
+        # Combined QKV projection
+        qkv = self.to_qkv(x).chunk(3, dim=-1)
+        q, k, v = map(lambda t: t.view(b, n, self.heads, self.head_dim).transpose(1, 2), qkv)
+        
+        # Scaled dot-product attention with rescaling
+        scores = torch.matmul(q, k.transpose(-2, -1)) * (self.rescale_factor / math.sqrt(self.head_dim))
+        attn = torch.softmax(scores, dim=-1)
+        attn = self.attention_dropout(attn)
+        
+        out = torch.matmul(attn, v)
+        out = out.transpose(1, 2).contiguous().view(b, n, d)
+        return self.to_out(out)
 
-class FeedForward(nn.Module):
+class DriftRobustFeedForward(nn.Module):
     def __init__(self, dim, hidden_dim, dropout):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(dim, hidden_dim),
             nn.GELU(),
             nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim),  # Additional layer
+            nn.GELU(),
+            nn.Dropout(dropout),
             nn.Linear(hidden_dim, dim),
             nn.Dropout(dropout)
         )
+        self.rescale = nn.Parameter(torch.tensor(0.5))  # Learned residual scale
 
     def forward(self, x):
-        return self.net(x)
-        
-
-
-# class TransformerBlock(nn.Module):
-#     def __init__(self, dim, num_heads, mlp_dim, dropout):
-#         super().__init__()
-
-#         self.attn = MultiHeadAttention(dim, num_heads, dropout)
-#         self.ff = FeedForward(dim, mlp_dim, dropout)
-#         self.norm1 = nn.LayerNorm(dim)
-#         self.norm2 = nn.LayerNorm(dim)
-
-#     def forward(self, x):
-#         # attention + residual + norm
-#         x = x + self.attn(self.norm1(x))
-        
-#         # feedforward + residual + norm
-#         x = x + self.ff(self.norm2(x))
-
-#         return x
-        
-# class FeatureProbabilityGate(nn.Module):
-#     def __init__(self, num_features):
-#         super().__init__()
-#         self.ln = nn.LayerNorm(num_features)
-#         self.proj = nn.Linear(num_features, num_features)
-
-#     def forward(self, x):
-#         # x: (batch, num_features)
-#         x = self.ln(x)  # helps with feature drift
-#         probs = torch.sigmoid(self.proj(x))  # smoother, per-feature weights
-#         return probs
-
-class FeatureProbabilityGate(nn.Module):
-    def __init__(self, num_features):
-        super().__init__()
-        self.ln = nn.LayerNorm(num_features)
-        # Instead of linear projection, learn per-feature bias
-        self.bias = nn.Parameter(torch.zeros(num_features))
-
-    def forward(self, x):
-        x = self.ln(x)
-        # Use sigmoid on x + learned bias per feature
-        probs = torch.sigmoid(x + self.bias)
-        return probs
-
+        return x * self.rescale + self.net(x)
 
 class TransformerBlock(nn.Module):
     def __init__(self, dim, heads, mlp_dim, dropout):
         super().__init__()
-        self.attn = MultiHeadAttention(dim=dim, heads=heads, dropout=dropout)
-        self.ln1 = nn.LayerNorm(dim)
-
-        self.ff = nn.Sequential(
-            nn.Linear(dim, mlp_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(mlp_dim, dim),
-            nn.Dropout(dropout),
-        )
-        self.ln2 = nn.LayerNorm(dim)
+        self.attn = DriftAwareMultiHeadAttention(dim=dim, heads=heads, dropout=dropout)
+        self.ln1 = nn.BatchNorm1d(dim)  # Using BatchNorm for better drift handling
+        
+        self.ff = DriftRobustFeedForward(dim, mlp_dim, dropout)
+        self.ln2 = nn.BatchNorm1d(dim)
+        
+        # Additional stabilization
+        self.attn_gate = nn.Parameter(torch.tensor(0.5))
+        self.ff_gate = nn.Parameter(torch.tensor(0.5))
 
     def forward(self, x):
-        # Apply custom attention
-        attn_out = self.attn(self.ln1(x))
-        x = x + attn_out
+        # Permute for BatchNorm
+        orig_shape = x.shape
+        x = x.reshape(-1, orig_shape[-1])
+        
+        # Attention path
+        attn_out = self.attn(self.ln1(x).view(orig_shape))
+        x = x.view(orig_shape) + attn_out * self.attn_gate
+        
+        # Feedforward path
+        x_flat = x.reshape(-1, orig_shape[-1])
+        ff_out = self.ff(self.ln2(x_flat)).view(orig_shape)
+        return x + ff_out * self.ff_gate
 
-        # Feedforward + residual
-        ff_out = self.ff(self.ln2(x))
-        return x + ff_out
-
-
-class RowWiseTransformers(nn.Module):
-    def __init__(self, num_features, dim, depth, heads, mlp_dim, dropout, hidden_dim=32):
+class RobustRowWiseTransformers(nn.Module):
+    def __init__(self, num_features, dim, depth, heads, mlp_dim, dropout, hidden_dim=64):
         super().__init__()
-
-        self.num_features = num_features
-        self.dim = dim
-        self.feature_gate = FeatureProbabilityGate(num_features)
-
+        
+        # Enhanced feature processing
+        self.input_net = nn.Sequential(
+            nn.BatchNorm1d(num_features),
+            nn.Dropout(dropout * 2),  # Higher dropout for input
+        )
+        
+        self.feature_gate = RobustFeatureProbabilityGate(num_features)
+        
+        # More powerful feature embedding
         self.feature_embed = nn.Sequential(
             nn.Linear(1, hidden_dim),
             nn.GELU(),
+            nn.LayerNorm(hidden_dim),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
             nn.Linear(hidden_dim, dim)
         )
-
-        self.pos_embed = nn.Parameter(torch.randn(1, num_features, dim))
-
+        
+        # Learnable position embeddings (though data is shuffled)
+        self.pos_embed = nn.Parameter(torch.randn(1, num_features, dim) * 0.02)
+        
+        # Transformer blocks
         self.layers = nn.ModuleList([
-            TransformerBlock(dim, heads, mlp_dim, dropout) for _ in range(depth)
+            TransformerBlock(dim, heads, mlp_dim, dropout) 
+            for _ in range(depth)
         ])
-
-        self.final_norm = nn.LayerNorm(dim)
-
+        
+        # Robust output network
         self.to_out = nn.Sequential(
-            nn.Flatten(),
-            nn.LayerNorm(num_features * dim),
-            nn.Linear(num_features * dim, 1)
+            nn.BatchNorm1d(num_features * dim),
+            nn.Dropout(dropout),
+            nn.Linear(num_features * dim, num_features * dim // 2),
+            nn.GELU(),
+            nn.LayerNorm(num_features * dim // 2),
+            nn.Linear(num_features * dim // 2, 1)
         )
+        
+        # Initialization
+        self._init_weights()
+
+    def _init_weights(self):
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.xavier_normal_(module.weight)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
+            elif isinstance(module, nn.LayerNorm):
+                nn.init.constant_(module.weight, 1)
+                nn.init.constant_(module.bias, 0)
 
     def forward(self, x):
-        # x: (batch, num_features)
-        feature_weights = self.feature_gate(x)  # (batch, num_features)
-        x = x * feature_weights  # per-feature learned importance
-
-        x = x.unsqueeze(-1)  # (batch, num_features, 1)
-        x = self.feature_embed(x)  # (batch, num_features, dim)
+        # Input processing
+        x = self.input_net(x)
+        
+        # Feature gating
+        feature_weights = self.feature_gate(x)
+        x = x * feature_weights
+        
+        # Feature embedding
+        x = x.unsqueeze(-1)
+        x = self.feature_embed(x)
         x = x + self.pos_embed
-
+        
+        # Transformer blocks
         for layer in self.layers:
             x = layer(x)
+            
+        # Output processing
+        x = x.flatten(1)
+        return self.to_out(x).squeeze(-1)
 
-        x = self.final_norm(x)
+def build_robust_transformers(num_features, dim=64, heads=4, depth=6, mlp_dim=256, dropout=0.2):
+    return RobustRowWiseTransformers(
+        num_features=num_features,
+        dim=dim,
+        heads=heads,
+        depth=depth,
+        mlp_dim=mlp_dim,
+        dropout=dropout
+    )
 
-        out = self.to_out(x)
-        return out.squeeze(-1)
-
+class DataAugmentation:
+    """Augmentation to simulate test-time conditions"""
+    def __init__(self, p=0.5):
+        self.p = p
         
-# function to build transformers model
-def build_transformers(num_features, dim, heads, depth, mlp_dim, dropout):
-    return RowWiseTransformers(num_features=num_features, dim=dim, heads=heads, depth=depth, mlp_dim=mlp_dim, dropout=dropout)
-
+    def __call__(self, x):
+        if torch.rand(1) < self.p:
+            # Feature noise
+            x = x * torch.randn_like(x).clamp(-0.3, 0.3) + 0.1 * torch.randn(1, device=x.device)
+            
+            # Random feature mixing
+            if x.size(0) > 1 and torch.rand(1) < 0.3:
+                idx = torch.randperm(x.size(0))
+                lam = torch.rand(1, device=x.device) * 0.4 + 0.3
+                x = lam * x + (1 - lam) * x[idx]
+                
+        return x
 
 if __name__ == "__main__":
-    batch_size = 16
+    batch_size = 32
     num_features = 200
     
-    model = build_transformers(num_features=num_features, dim=64, heads= 4, depth=6, mlp_dim=2048, dropout=0.1)
+    model = build_robust_transformers(
+        num_features=num_features,
+        dim=64,
+        heads=4,
+        depth=6,
+        mlp_dim=256,
+        dropout=0.2
+    )
+    
     dummy_x = torch.randn(batch_size, num_features)
-
+    aug = DataAugmentation()
+    
+    # Test augmentation
+    augmented_x = aug(dummy_x.clone())
+    
+    # Test model
     preds = model(dummy_x)
-    print(preds.shape)  # (batch_size,)
-
-
-
-
-
-
-
-
-
-
-
+    print(f"Input shape: {dummy_x.shape}")
+    print(f"Output shape: {preds.shape}")
+    print(f"Model parameters: {sum(p.numel() for p in model.parameters())/1e6:.2f}M")
