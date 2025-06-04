@@ -72,33 +72,59 @@ class FeedForward(nn.Module):
         
 
 
-class TransformerBlock(nn.Module):
-    def __init__(self, dim, num_heads, mlp_dim, dropout):
-        super().__init__()
+# class TransformerBlock(nn.Module):
+#     def __init__(self, dim, num_heads, mlp_dim, dropout):
+#         super().__init__()
 
-        self.attn = MultiHeadAttention(dim, num_heads, dropout)
-        self.ff = FeedForward(dim, mlp_dim, dropout)
-        self.norm1 = nn.LayerNorm(dim)
-        self.norm2 = nn.LayerNorm(dim)
+#         self.attn = MultiHeadAttention(dim, num_heads, dropout)
+#         self.ff = FeedForward(dim, mlp_dim, dropout)
+#         self.norm1 = nn.LayerNorm(dim)
+#         self.norm2 = nn.LayerNorm(dim)
 
-    def forward(self, x):
-        # attention + residual + norm
-        x = x + self.attn(self.norm1(x))
+#     def forward(self, x):
+#         # attention + residual + norm
+#         x = x + self.attn(self.norm1(x))
         
-        # feedforward + residual + norm
-        x = x + self.ff(self.norm2(x))
+#         # feedforward + residual + norm
+#         x = x + self.ff(self.norm2(x))
 
-        return x
+#         return x
         
 class FeatureProbabilityGate(nn.Module):
     def __init__(self, num_features):
         super().__init__()
+        self.ln = nn.LayerNorm(num_features)
         self.proj = nn.Linear(num_features, num_features)
 
     def forward(self, x):
         # x: (batch, num_features)
-        probs = F.softmax(self.proj(x), dim=-1)  # (batch, num_features)
+        x = self.ln(x)  # helps with feature drift
+        probs = torch.sigmoid(self.proj(x))  # smoother, per-feature weights
         return probs
+
+class TransformerBlock(nn.Module):
+    def __init__(self, dim, heads, mlp_dim, dropout):
+        super().__init__()
+        self.attn = MultiHeadAttention(dim=dim, heads=heads, dropout=dropout)
+        self.ln1 = nn.LayerNorm(dim)
+
+        self.ff = nn.Sequential(
+            nn.Linear(dim, mlp_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(mlp_dim, dim),
+            nn.Dropout(dropout),
+        )
+        self.ln2 = nn.LayerNorm(dim)
+
+    def forward(self, x):
+        # Apply custom attention
+        attn_out = self.attn(self.ln1(x))
+        x = x + attn_out
+
+        # Feedforward + residual
+        ff_out = self.ff(self.ln2(x))
+        return x + ff_out
 
 
 class RowWiseTransformers(nn.Module):
@@ -107,23 +133,20 @@ class RowWiseTransformers(nn.Module):
 
         self.num_features = num_features
         self.dim = dim
+        self.feature_gate = FeatureProbabilityGate(num_features)
 
-        self.feature_prob_gate = FeatureProbabilityGate(num_features)
-
-        # embed each scalar feature to vector dim
         self.feature_embed = nn.Sequential(
             nn.Linear(1, hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, dim)
         )
 
-        # positional embeddings per features
         self.pos_embed = nn.Parameter(torch.randn(1, num_features, dim))
 
-        # stacks of transformers blocks
-        self.layers = nn.ModuleList([TransformerBlock(dim, heads, mlp_dim, dropout) for _ in range(depth)])
+        self.layers = nn.ModuleList([
+            TransformerBlock(dim, heads, mlp_dim, dropout) for _ in range(depth)
+        ])
 
-        # final mlp head
         self.to_out = nn.Sequential(
             nn.Flatten(),
             nn.LayerNorm(num_features * dim),
@@ -131,29 +154,20 @@ class RowWiseTransformers(nn.Module):
         )
 
     def forward(self, x):
-        # x -> (batch, num_features)
+        # x: (batch, num_features)
+        feature_weights = self.feature_gate(x)  # (batch, num_features)
+        x = x * feature_weights  # per-feature learned importance
 
-        # Step 1: Get per-feature probabilities
-        probs = self.feature_prob_gate(x)  # (batch, num_features)
+        x = x.unsqueeze(-1)  # (batch, num_features, 1)
+        x = self.feature_embed(x)  # (batch, num_features, dim)
+        x = x + self.pos_embed
 
-        # Step 2: Embed each scalar feature
-        x_emb = x.unsqueeze(-1)  # (batch, num_features, 1)
-        x_emb = self.feature_embed(x_emb)  # (batch, num_features, dim)
-
-        # Step 3: Weight embeddings by probabilities
-        x_emb = x_emb * probs.unsqueeze(-1)  # (batch, num_features, dim)
-
-        # Step 4: Add positional embeddings
-        x_emb = x_emb + self.pos_embed  # (batch, num_features, dim)
-
-        # Step 5: Transformer layers
         for layer in self.layers:
-            x_emb = layer(x_emb)
+            x = layer(x)
 
-        # Step 6: Output MLP head
-        out = self.to_out(x_emb)  # (batch, 1)
+        out = self.to_out(x)
+        return out.squeeze(-1)
 
-        return out.squeeze(-1)  # (batch,)
         
 # function to build transformers model
 def build_transformers(num_features, dim, heads, depth, mlp_dim, dropout):
